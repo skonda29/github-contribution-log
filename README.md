@@ -45,38 +45,45 @@ The maintainer has indicated that a provider refactor is currently underway, so 
 
 # Phase II — Reproduce and Plan (Week 2)
 
-This phase covers standing up a local development environment, reproducing the
-"bug" (for a feature-add issue, this means empirically confirming the missing
-adapter and the design blocker), and writing the implementation plan.
+For this phase the goal was to actually get the project running on my own
+machine, prove to myself that the feature is really missing, and then write
+down a plan for how I'm going to add it. Since this issue is about adding a new
+provider (not fixing something broken), "reproducing the bug" for me meant
+showing that vLLM genuinely isn't there yet and finding out what's standing in
+the way.
 
-A key finding up front: the **provider refactor the maintainer mentioned in
-Phase I has now landed**. The package no longer uses a flat
-`providers/src/vllm-provider.ts` layout as the issue text describes. It now uses
-a **leaf-directory structure** with a code-generation step. The plan below
-targets the current structure.
+One thing I noticed right away: the refactor the maintainer told me about in
+Phase I has already been merged. So the file path in the original issue
+(`providers/src/vllm-provider.ts`) doesn't exist anymore. The providers are now
+organized into small folders, one per provider, and there's a script that
+auto-generates some files. I made sure my plan matches the new layout instead of
+the old issue text.
 
 ---
 
-## 1. Local Development Environment
+## 1. Setting up the project locally
 
-I cloned `orthogonalhq/nous-core` and got the relevant package building and
-testing cleanly. Two environment issues were worth recording:
+I cloned `orthogonalhq/nous-core` and tried to install and run the tests. It
+took me a couple of tries, and I ran into one annoying problem that I want to
+write down so I don't forget it.
 
-### Node version (blocker)
+### The Node version problem
 
-The repo targets **Node 22+** (`pnpm` v10 workspace). On **Node 24**,
-`pnpm install` crashes with:
+My machine had Node 24 installed. Every time I ran `pnpm install` it crashed
+with this scary error:
 
 ```
 FATAL ERROR: invalid array length
 ... node::crypto::Hash::OneShotDigest ...
 ```
 
-This is a known incompatibility between pnpm 10.6.2's one-shot `crypto.hash()`
-and Node 24. **Fix:** use Node 22 (I used `node-v22.14.0`). After switching,
-`pnpm install` completes in ~25s.
+I was confused at first, but after looking into it I figured out that the
+project is meant to run on **Node 22**, and the version of pnpm it uses doesn't
+play nicely with Node 24. Once I downloaded Node 22 (`node-v22.14.0`) and used
+that instead, the install finished in about 25 seconds with no errors. Lesson
+learned: check the required Node version first!
 
-### Working command sequence
+### The commands that worked for me
 
 ```bash
 git clone https://github.com/orthogonalhq/nous-core.git
@@ -84,25 +91,29 @@ cd nous-core
 corepack prepare pnpm@10.6.2 --activate
 pnpm install
 
-# The provider package depends on three workspace packages. A full repo
-# `pnpm build` currently fails in an UNRELATED package (@nous/cortex-core,
-# missing sibling dist), so build only the providers runtime closure:
+# The provider package needs three other workspace packages built first.
+# I tried running the full `pnpm build` but it failed in a different package
+# (@nous/cortex-core) that has nothing to do with my issue, so I only built
+# the parts I actually need:
 pnpm --filter @nous/shared run build
 pnpm --filter @nous/subcortex-inference-runtime run build
 pnpm --filter @nous/autonomic-config run build
 
-# Run the provider test suite:
+# Then I ran the provider tests:
 npx vitest run self/subcortex/providers
 ```
 
-Result: **19 test files, 265 tests — all passing.** Green baseline confirmed.
+This gave me **19 test files and 265 tests, all passing**. So now I have a
+working baseline and I know the existing code is healthy before I start changing
+anything.
 
 ---
 
-## 2. Reproducing the Gap
+## 2. Proving the gap is real
 
-Because #317 is a feature-add, "the bug" is the absence of the vLLM adapter.
-I confirmed this empirically against the built `dist` artifacts:
+Since I can't "reproduce" a crash for a missing feature, I instead wrote a tiny
+script that imports the built provider code and prints out what's registered.
+Here's what it showed:
 
 ```text
 Registered provider vendorKeys : [ 'anthropic', 'ollama', 'openai' ]
@@ -111,130 +122,116 @@ resolveProviderFactory("vllm") : undefined
 ChatCompletionsProvider w/o key: THROWS -> PROVIDER_AUTH_FAILED - OpenAI API key required …
 ```
 
-Three concrete findings:
+From this I learned three things:
 
-1. **No vLLM definition / factory / adapter.** `PROVIDER_DEFINITIONS` and
-   `resolveProviderFactory('vllm')` have no vLLM entry.
-2. **The issue's target path is stale.** It says create
-   `providers/src/vllm-provider.ts`, but the package was refactored into
-   **leaf directories** — `src/providers/<vendor>/` each containing
-   `definition.ts`, `adapter.ts`, `provider.ts`, `index.ts` — plus a
-   generated-aggregate codegen step (`scripts/generate-provider-aggregates.mjs`).
-3. **Core design blocker — optional auth.** vLLM is OpenAI-compatible, so the
-   natural reuse is the existing `ChatCompletionsProvider` (exactly what the
-   `openai` leaf does). But that provider's constructor **throws** when no API
-   key is present, while vLLM auth is *optional* (self-hosted). The registry
-   calls the factory with `apiKey: undefined` for local/optional-auth
-   providers, so a naïve reuse would throw at construction. This is the one real
-   design decision to resolve.
+1. **vLLM really isn't there.** The list of providers only has anthropic,
+   ollama, and openai. Asking for a "vllm" provider gives back nothing.
+2. **The old file path is gone.** Like I mentioned above, the code is now split
+   into per-provider folders (`src/providers/<name>/` with `definition.ts`,
+   `adapter.ts`, `provider.ts`, and `index.ts`), and there's a generator script
+   that builds the combined lists for me.
+3. **There's one tricky part.** vLLM uses the same API format as OpenAI, so my
+   first thought was to just reuse the existing OpenAI-style provider. But that
+   provider *requires* an API key and throws an error without one. vLLM is
+   usually self-hosted, so the API key should be optional. This is the main
+   thing I'll need to solve.
 
 ---
 
-## 3. Implementation Plan
+## 3. My plan for the implementation
 
-### Design decisions
+### The approach I want to take
 
-- **Reuse the `chat-completions` protocol** (`/v1/chat/completions`,
-  OpenAI-compatible) instead of writing a new wire format. vLLM speaks this
-  natively.
-- **Treat vLLM as local/self-hosted:** `isLocal: true`,
-  `providerClass: 'local_text'`, `auth.required: false`. This mirrors how
-  Ollama is treated and makes the registry skip the API-key requirement and
-  preserve the user's custom endpoint (the registry only overrides endpoints
-  for non-local providers).
-- **`vendorKey: 'vllm'`** is safe — `ProviderVendor` in `@nous/shared` is an
-  open string union, so no shared-package change is needed.
-- **Default endpoint** `http://localhost:8000`; **default model** a placeholder
-  such as `meta-llama/Llama-3.1-8B-Instruct` (vLLM serves whatever model was
-  launched; `defaultModelId` only needs to be a non-empty string).
-- **Well-known provider id:** `10000000-0000-0000-0000-000000000004`
-  (next after anthropic `…001`, openai `…002`, ollama `…003`).
+- **Reuse the existing OpenAI-compatible provider** instead of writing all the
+  HTTP/streaming code from scratch, because vLLM speaks the same
+  `/v1/chat/completions` format.
+- **Treat vLLM as a local provider** (`isLocal: true`, `auth.required: false`),
+  the same way Ollama is treated. This way the app won't force an API key and
+  won't overwrite the user's custom server URL.
+- **Use `vendorKey: 'vllm'`** — I checked, and the vendor field is just an open
+  string, so I don't have to touch the shared package to add a new name.
+- **Default settings:** endpoint `http://localhost:8000` and a placeholder model
+  id (vLLM serves whatever model you started it with, the field just can't be
+  empty).
+- **Give it a new ID** `10000000-0000-0000-0000-000000000004` (the next number
+  after the existing three providers).
 
-### Optional-auth handling (the one real code decision)
+### Fixing the optional API key (the one real decision)
 
-- **Recommended (Option B):** add a small, backward-compatible option to
-  `ChatCompletionsProvider` — `requireApiKey?: boolean` (default `true`) — and
-  only send the `Authorization` header when a key exists. The vLLM factory
-  passes `requireApiKey: false`. This keeps a single code path, respects the
-  scope boundary (only `IModelProvider` and `TextModelInputSchema` are
-  off-limits), and the existing "constructor throws when no API key" test still
-  passes via the default.
-- **Alternative (Option A):** a dedicated `VllmProvider` in
-  `providers/vllm/implementation.ts`. More isolated, but duplicates the
-  chat-completions logic. I will go with Option B and note A in the PR.
+- **My plan (Option B):** add a small `requireApiKey` option to the existing
+  provider that defaults to `true`, and only send the auth header when a key is
+  actually provided. My vLLM factory will pass `requireApiKey: false`. This is a
+  tiny change, doesn't break the existing tests, and stays inside the issue's
+  rules (I'm not allowed to change `IModelProvider` or `TextModelInputSchema`,
+  and I'm not).
+- **Backup idea (Option A):** write a completely separate `VllmProvider` class.
+  It's more isolated but copies a lot of code, so I'd rather not. I'll mention
+  it in the PR as the alternative.
 
-### Files to create
+### New files I'll add
 
-- `self/subcortex/providers/src/providers/vllm/definition.ts` —
-  `VLLM_PROVIDER_DEFINITION` (`vendorKey:'vllm'`, `protocol:'chat-completions'`,
-  `adapterKey:'chat-completions'`,
-  `auth:{ required:false, envVar:'VLLM_API_KEY', purpose:'api_key' }`,
-  `isLocal:true`, capabilities `{ streaming:true, nativeToolUse:true }`),
-  exported `as providerDefinition`.
-- `self/subcortex/providers/src/providers/vllm/adapter.ts` — re-export the
-  chat-completions adapter `as providerAdapter` (mirrors the `openai` leaf).
-- `self/subcortex/providers/src/providers/vllm/provider.ts` — `providerFactory`
-  (`vendorKey:'vllm'`) that builds
-  `new ChatCompletionsProvider(config, { apiKey: options?.apiKey, requireApiKey: false })`.
-- `self/subcortex/providers/src/providers/vllm/index.ts` — re-export
-  `providerAdapter`, `providerDefinition`, `providerFactory`.
-- `self/subcortex/providers/src/__tests__/vllm-provider.test.ts` — mirror
-  `chat-completions-provider.test.ts`: getConfig, input validation
-  (`ValidationError`), invoke happy path, streaming, 401/429/timeout
-  classification, **and a new "constructs without an API key" case**.
+- `src/providers/vllm/definition.ts` — describes the provider (name, protocol,
+  default endpoint/model, optional auth via `VLLM_API_KEY`, marked as local).
+- `src/providers/vllm/adapter.ts` — re-uses the existing chat-completions
+  adapter (same as the openai folder does).
+- `src/providers/vllm/provider.ts` — the factory that creates the provider with
+  `requireApiKey: false`.
+- `src/providers/vllm/index.ts` — exports the three pieces above.
+- `src/__tests__/vllm-provider.test.ts` — tests copied/adapted from the existing
+  openai provider tests, plus a new test that checks it works **without** an API
+  key.
 
-### Files to modify
+### Existing files I'll need to change
 
-- `self/subcortex/providers/src/protocols/openai-api/provider.ts` — add the
-  `requireApiKey` option and a conditional `Authorization` header (Option B).
-- `self/subcortex/providers/src/index.ts` — export the vLLM provider entry
-  (matching the openai leaf pattern).
-- **Regenerate aggregates (do not hand-edit):**
-  `pnpm --filter @nous/subcortex-providers run generate:providers` updates
-  `provider-definitions.ts`, `provider-factories.ts`, and
-  `provider-adapters.ts`. `check:generated` (part of `build`) enforces this.
+- `src/protocols/openai-api/provider.ts` — add the `requireApiKey` option and
+  the conditional auth header.
+- `src/index.ts` — export the new vLLM provider.
+- **Re-run the generator** (`pnpm --filter @nous/subcortex-providers run
+  generate:providers`) so the auto-generated provider lists pick up vLLM. I
+  learned I should *not* edit those generated files by hand — there's a check
+  that fails the build if they're out of sync.
 
-### Tests that hardcode the provider set and must be updated
+### Tests that already hardcode the provider list (so they'll break until I fix them)
 
-- `__tests__/provider-codegen.test.ts` → expected list becomes
-  `['anthropic','ollama','openai','vllm']`.
-- `__tests__/provider-pipeline-integration.test.ts` → add `'vllm'` to the
-  expected `vendorKey` list.
-- `__tests__/provider-definitions/provider-definitions.test.ts` → add a `vllm`
-  row to the expected definitions table and the sorted vendor list.
+- `__tests__/provider-codegen.test.ts` — expects `['anthropic','ollama','openai']`,
+  needs `'vllm'` added.
+- `__tests__/provider-pipeline-integration.test.ts` — same kind of list to update.
+- `__tests__/provider-definitions/provider-definitions.test.ts` — needs a vllm
+  row added.
 
-### Acceptance-criteria mapping (from the issue)
+### Checking the issue's requirements
 
-| Criterion | How it's satisfied |
+| What the issue asks for | How my plan covers it |
 |---|---|
-| Implements `IModelProvider` (invoke / stream / getConfig) | Via `ChatCompletionsProvider` reuse |
-| Validates input against `TextModelInputSchema` | Inherited from `ChatCompletionsProvider` |
-| Handles streaming correctly | Inherited SSE parser |
-| Exported from `src/index.ts` | Added export |
-| Tests in `src/__tests__/` | New `vllm-provider.test.ts` |
-| Scope boundary respected | No edits to `IModelProvider` / `TextModelInputSchema` |
+| invoke / stream / getConfig | Reused from the OpenAI-compatible provider |
+| Validates input | Already handled by the reused provider |
+| Streaming works | Already handled by the reused provider |
+| Exported from the index | I'll add the export |
+| Tests included | New `vllm-provider.test.ts` |
+| Don't change the shared interface/schema | My plan doesn't touch them |
 
-### Verification steps for the PR
+### How I'll double-check before opening the PR
 
 ```bash
 pnpm --filter @nous/subcortex-providers run generate:providers
 pnpm --filter @nous/subcortex-providers run check:generated
-npx vitest run self/subcortex/providers   # expect green incl. new vllm tests
-pnpm lint                                  # oxlint
+npx vitest run self/subcortex/providers   # should still be all green
+pnpm lint
 ```
 
-Plus a grep across the wider monorepo for any other hardcoded provider-vendor
-lists (router / cortex config) that may also enumerate vendors.
+I'll also search the rest of the project for any other place that lists the
+providers by name, just in case something else needs updating too.
 
 ---
 
-## Phase II Outcome
+## What I finished in Phase II
 
-- Local environment stands up and the provider test suite passes (265 tests).
-- The missing-adapter gap and the optional-auth blocker are both reproduced
-  empirically.
-- A concrete, file-by-file implementation plan is ready, aligned to the
-  refactored leaf-directory + codegen structure rather than the stale path in
-  the original issue text.
+- I got the project building and the provider tests passing on my machine (265
+  tests green).
+- I proved that vLLM is missing and found the one real obstacle (the required
+  API key).
+- I wrote a clear, step-by-step plan that fits the new code layout instead of
+  the outdated path in the issue.
 
-Next phase: implement the plan (Option B) and open the PR.
+**Next up (Phase III):** actually write the code following this plan and open
+the pull request.
