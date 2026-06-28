@@ -6,7 +6,7 @@
 
 **Issue:** https://github.com/orthogonalhq/nous-core/issues/317
 
-**Status:** Phase III Complete
+**Status:** Phase IV Complete — PR [#417](https://github.com/orthogonalhq/nous-core/pull/417) open against upstream
 
 ---
 
@@ -76,9 +76,9 @@ needs.
 ### Affected Components
 
 - `self/subcortex/providers/src/providers/vllm/` (new leaf)
-- `self/subcortex/providers/src/providers/ollama/` (reference: local provider)
-- `self/subcortex/providers/src/providers/openai/` (reference: OpenAI-compatible leaf)
-- `self/subcortex/providers/src/protocols/openai-api/` (shared protocol I extended)
+- `self/subcortex/providers/src/providers/llama-cpp/` (primary reference: local OpenAI-compatible server, merged in #403)
+- `self/subcortex/providers/src/providers/groq/` (reference: optional/keyed OpenAI-compatible leaf, merged in #404)
+- `self/subcortex/providers/src/protocols/openai-api/` (shared protocol I reuse, unmodified)
 - `self/subcortex/providers/src/provider-definitions.ts` (generated)
 - `self/subcortex/providers/src/provider-adapters.ts` (generated)
 - `self/subcortex/providers/src/provider-factories.ts` (generated)
@@ -151,17 +151,19 @@ way is that this shared provider hard-requires an API key.
 
 Add vLLM as a provider leaf under
 `self/subcortex/providers/src/providers/vllm/`, reuse the OpenAI-compatible
-protocol, and make the API key optional so self-hosted servers work without
-credentials. Use **Ollama** as the reference for the local-provider shape and
-**OpenAI** as the reference for reusing the chat-completions protocol.
+protocol, and support the keyless self-hosted case **without modifying the
+shared provider**. Use **llama.cpp** as the reference for the local
+OpenAI-compatible shape (it is the closest analog to vLLM) and **Groq** as the
+reference for the optional API-key metadata.
 
 ### Implementation Plan
 
 **Understand:** nous-core needs vLLM as a local provider that reuses the
-OpenAI-compatible path but doesn't force an API key.
+OpenAI-compatible path but works without an API key by default.
 
-**Match:** reference leaves are `providers/ollama/` (local provider shape) and
-`providers/openai/` + `protocols/openai-api/` (OpenAI-compatible behavior).
+**Match:** the reference leaves are `providers/llama-cpp/` (local
+OpenAI-compatible server, the direct analog) and `providers/groq/` +
+`protocols/openai-api/` (OpenAI-compatible behavior + auth metadata).
 
 **Plan:**
 
@@ -169,35 +171,37 @@ OpenAI-compatible path but doesn't force an API key.
 - Configure vLLM values: `vendorKey: 'vllm'`, `isLocal: true`,
   `auth.required: false`, env var `VLLM_API_KEY`, endpoint `http://localhost:8000`.
 - Reuse the shared chat-completions adapter and provider.
-- Add a small `requireApiKey` option to the chat-completions provider so the
-  auth header is only sent when a key exists — without touching `IModelProvider`
-  or `TextModelInputSchema`.
+- Handle the keyless path the way the merged llama.cpp leaf does — pass a
+  `'no-auth'` placeholder key to the factory so the shared
+  `ChatCompletionsProvider` key guard is satisfied, and forward a real bearer
+  token when `VLLM_API_KEY` is set. **No change** to `ChatCompletionsProvider`,
+  `IModelProvider`, or `TextModelInputSchema`.
+- Let the built-in provider id derive from `vendorKey` (do **not** hand-author
+  `wellKnownProviderId`).
 - Run the catalog generator — don't hand-edit the generated files.
 - Add vLLM-specific tests, especially the keyless path.
 - Run typecheck and the full provider suite.
 
-**Implement:** branch `feat/vllm-provider-317`.
+**Implement:** branch `feat/vllm-provider-317-leaf`, based on the integration
+branch `feat/contributor-friendly-inference-provider-surface`.
 
 **Review:**
 
 - ✅ Follows the certified provider leaf structure
 - ✅ Added under `self/subcortex/providers/src/providers/vllm/`
 - ✅ Reuses the OpenAI-compatible protocol (no custom runtime branches)
-- ✅ Optional API key added without changing `IModelProvider` or `TextModelInputSchema`
+- ✅ Keyless path handled via the `'no-auth'` placeholder (same as the merged
+  llama.cpp leaf) — `IModelProvider`, `TextModelInputSchema`, and the shared
+  `ChatCompletionsProvider` are all unchanged
 - ✅ Generated catalogs updated via the generator only
-- ✅ Follows the Ollama reference for the local-provider shape
+- ✅ Follows the llama.cpp reference for the local-provider shape
 - ✅ Required exports added through `index.ts`
-- ✅ Tests added and passing (273)
-- ⚠️ `wellKnownProviderId`: I hand-authored it
-  (`10000000-0000-0000-0000-000000000004`) to match the current `ollama` /
-  `anthropic` leaves on the branch I built against. The issue's 2026-06-18
-  update says leaves on the `feat/contributor-friendly-inference-provider-surface`
-  branch should *not* hand-author this and should derive it from `vendorKey`. I
-  noted this as a reconcile/rebase step before opening the PR against that
-  branch (see Pull Request below).
+- ✅ `wellKnownProviderId` derived from `vendorKey` (not hand-authored)
+- ✅ Tests added and passing (378 provider tests)
 
-**Evaluate:** verified with `check:generated`, `tsc`, and the full provider test
-suite (273 passing).
+**Evaluate:** verified with `check:generated`, `typecheck` (which enforces the
+exact provider-key union), `lint`, and the full provider test suite (378
+passing).
 
 ---
 
@@ -227,89 +231,89 @@ path in the original issue.
     - `definition.ts` — vLLM metadata (`vendorKey: 'vllm'`,
       `providerClass: 'local_text'`, `isLocal: true`, `auth.required: false`,
       env var `VLLM_API_KEY`, endpoint `http://localhost:8000`, reuses the
-      `chat-completions` protocol/adapter).
+      `chat-completions` protocol/adapter). No hand-authored
+      `wellKnownProviderId` — it derives from `vendorKey`.
     - `adapter.ts` — re-exports the shared chat-completions adapter (same as the
-      OpenAI leaf does), since vLLM is OpenAI-compatible.
-    - `provider.ts` — factory that wraps `ChatCompletionsProvider` with
-      `requireApiKey: false` and `apiKey: process.env.VLLM_API_KEY`.
+      llama.cpp and OpenAI leaves), since vLLM is OpenAI-compatible.
+    - `provider.ts` — factory that wraps `ChatCompletionsProvider`, passing
+      `apiKey: process.env.VLLM_API_KEY ?? 'no-auth'`.
     - `index.ts` — re-exports the leaf's public surface.
-- Added a small `requireApiKey` option (default `true`, so existing OpenAI
-  behavior is unchanged) to `protocols/openai-api/provider.ts`, and pulled the
-  header building into a `requestHeaders()` helper that only attaches
-  `Authorization` when a key is present.
 - Ran the catalog generator (`generate:providers`) to register vLLM in the
   generated catalogs — did not hand-edit them.
-- Updated the existing tests that hard-coded the old 3-provider roster.
-- Added a vLLM-specific test file with 8 tests.
+- Updated the existing tests that pin the provider roster.
+- Added a vLLM-specific test file with 15 tests.
+
+> **Phase IV reconciliation note.** My Phase II plan was written against an
+> older branch and proposed adding a `requireApiKey` option to the shared
+> `ChatCompletionsProvider` and hand-authoring `wellKnownProviderId`. When I
+> rebased onto the actual PR target
+> (`feat/contributor-friendly-inference-provider-surface`) I found the merged
+> llama.cpp leaf (#403) had already established the convention for keyless local
+> servers: pass a `'no-auth'` placeholder key and leave the shared provider
+> untouched, with ids derived centrally from `vendorKey`. I dropped the
+> shared-provider change and matched that accepted pattern instead. The sections
+> above reflect what was actually built and submitted.
 
 **Key commits:**
 
-- `65d7e30f` — feat(providers): support optional API key in chat-completions protocol
-- `0eae635c` — feat(providers): add vLLM provider leaf and register in catalog
-- `b113a39e` — test(providers): add vLLM provider unit tests
-- `7f9d864a` — test(providers): align adapter-resolver expectation with the vLLM leaf
+- `69f9914a` — feat(providers): add vLLM provider leaf and register in catalog
+- `873dfd06` — test(providers): add vLLM unit tests and align provider rosters
 
 **Challenges faced:**
 
-- **The required API key (the main one).** The shared chat-completions provider
-  throws `PROVIDER_AUTH_FAILED` if there's no key. vLLM is self-hosted, so I
-  added a `requireApiKey` option (default `true`) and only send the
-  `Authorization` header when a key is actually set. My vLLM factory passes
-  `requireApiKey: false`. It's a tiny change and doesn't break any existing
-  OpenAI tests.
+- **The keyless self-hosted path (the main one).** The shared chat-completions
+  provider throws `PROVIDER_AUTH_FAILED` if there's no key. vLLM is self-hosted
+  and usually keyless. My first instinct (Phase II) was to add a `requireApiKey`
+  flag to the shared provider, but the merged llama.cpp leaf showed the
+  project's accepted answer: pass a `'no-auth'` placeholder key from the leaf
+  factory so the guard is satisfied without modifying shared code, and forward a
+  real bearer token when `VLLM_API_KEY` is set. This keeps the change contained
+  to the leaf and matches precedent the maintainer already approved.
 
-- **Hard-coded provider rosters in *three* different places.** After adding the
-  leaf, I updated the test files I expected to break — but the build still
-  failed. `tsc` flagged `provider-definition-types.test.ts`, which uses a
-  type-level `Equal/Expect` assertion that the provider-key union is *exactly*
-  `'anthropic' | 'openai' | 'ollama'`; adding `vllm` widened the union, so it
-  failed at **compile time**, not runtime. Then when I ran the full suite,
-  `adapter-resolver.test.ts` failed at **runtime** because vLLM reuses the
-  `chat-completions` adapter, so that key now appears once per leaf
-  (`['anthropic','ollama','chat-completions','chat-completions','text']`). The
-  resolver dedupes by key internally, so it's harmless — but the test pins the
-  exact list. Lesson: adding a provider is a multi-place change, and `tsc` and
-  `vitest` catch *different* hard-coded lists, so I need to run both.
+- **Hard-coded provider rosters in several places.** After adding the leaf, the
+  build still failed until I updated every test that enumerates the roster.
+  `provider-definition-types.test.ts` uses a type-level `Equal/Expect` assertion
+  that the provider-key union is *exact*, so adding `vllm` failed at **compile
+  time**; `provider-codegen`, `provider-definitions`, `provider-pipeline-integration`,
+  and `adapter-resolver` pin the list at **runtime**. Lesson: adding a provider
+  is a multi-place change, and `tsc` and `vitest` catch *different* hard-coded
+  lists, so I run both.
 
-- **A benign "unknown vendor" log.** Registering vLLM prints
-  `stamped with unknown vendor 'vllm' — adapter will fall back to text`, because
-  `KNOWN_PROVIDER_VENDORS` in `@nous/shared` only lists the four baseline
-  vendors. I traced it and confirmed it only gates that advisory log — provider
-  construction goes through `resolveProviderFactory('vllm')` and adapter
-  resolution reads the leaf's `adapterKey: 'chat-completions'`, so vLLM resolves
-  correctly. Adding `vllm` to that list would modify `@nous/shared` and break a
-  shared test that pins its length to four, which the issue rules out, so I left
-  it as a documented follow-up instead of widening scope.
-
-- **Branch / `wellKnownProviderId` guidance.** The 2026-06-18 update describes a
-  newer provider-leaf surface that derives IDs from `vendorKey`. The code I
-  built against still hand-authors `wellKnownProviderId` (like the `ollama`
-  leaf), so I matched the actual code rather than text that didn't match it, and
-  flagged reconciling against the integration branch as the next step.
+- **`nativeToolUse` ambiguity across leaves.** The merged llama.cpp leaf
+  advertises `capabilities.nativeToolUse: true`, but the merged Groq leaf
+  intentionally omits it pending the shared native tool-use bridge. I matched
+  llama.cpp (the direct local analog) and flagged the inconsistency in the PR
+  description so the maintainer can decide — both PRs already note this is a
+  project-side `protocol`/`adapterKey`-vs-capabilities contract issue, not a
+  fault in the contribution.
 
 ---
 
 ## Testing Strategy
 
-**Tests added:** `src/__tests__/vllm-provider.test.ts` — 8 tests covering:
+**Tests added:** `src/__tests__/vllm-provider.test.ts` — 15 tests covering:
 
-- The leaf resolves through `resolveProviderDefinition('vllm')` and
-  `resolveProviderFactory('vllm')` with the right metadata (auth optional,
-  endpoint `http://localhost:8000`).
-- It constructs **without** an API key.
-- `invoke()` with no key sends **no** `Authorization` header and returns a
-  `ModelResponse`.
-- `invoke()` with `VLLM_API_KEY` set **does** send `Authorization: Bearer …`.
+- The definition metadata: local endpoint `http://localhost:8000`,
+  `isLocal: true`, `providerClass: 'local_text'`, optional auth with
+  `envVar: 'VLLM_API_KEY'`, the `chat-completions` protocol/adapter, and that it
+  does **not** hand-author `wellKnownProviderId`.
+- The factory creates a `ChatCompletionsProvider` and constructs **without** an
+  API key.
+- `invoke()` with no key sends `Authorization: Bearer no-auth`; with
+  `VLLM_API_KEY` set it sends `Authorization: Bearer <key>`.
+- Requests target `config.endpoint` (`localhost:8000`), not the OpenAI default.
 - Invalid input is rejected with `ValidationError`.
+- A 401 maps to `PROVIDER_AUTH_FAILED` and a non-ok response to
+  `PROVIDER_UNAVAILABLE`.
+- `invoke()` returns a `ModelResponse` on the happy path.
 - `stream()` yields content chunks from an SSE response and a final `done`.
-- The factory returns a `ChatCompletionsProvider` instance.
-- A 401 surfaces as `PROVIDER_AUTH_FAILED`.
 
-I wrote these to follow the existing patterns — reusing the project's own
+I wrote these to follow the existing patterns — mirroring the merged
+`llama-cpp-provider.test.ts` and reusing the project's own
 `resolveProviderDefinition` / `resolveProviderFactory` helpers and `vi`-mocked
-`fetch`, the same way the pipeline tests do.
+`fetch`.
 
-**Existing tests updated:**
+**Existing tests updated** (to include `vllm` in the pinned roster):
 
 - `src/__tests__/provider-definitions/provider-definitions.test.ts`
 - `src/__tests__/provider-definitions/provider-definition-types.test.ts`
@@ -319,19 +323,18 @@ I wrote these to follow the existing patterns — reusing the project's own
 
 **Validation performed:**
 
-- **273 provider tests passing** after all changes.
+- **378 provider tests passing** after all changes (27 files, 2 skipped).
 - `check:generated` passing — catalogs are in sync with the leaves.
-- `tsc --build` passing (this is what caught the type-level test).
-- Also verified the keyless behavior directly against the compiled output with a
-  small Node harness: with `VLLM_API_KEY` unset there's no `Authorization`
-  header; with it set the header is `Bearer <value>`; empty input throws
-  `ValidationError`.
+- `typecheck` passing — this is what enforces the type-level exact provider-key
+  union in `provider-definition-types.test.ts`.
+- `lint` (`oxlint self/`) — 0 errors.
 
 ---
 
 ## Code Changes
 
-**Branch:** `feat/vllm-provider-317`
+**Branch:** `feat/vllm-provider-317-leaf` (based on
+`feat/contributor-friendly-inference-provider-surface`)
 
 **Files created:**
 
@@ -343,7 +346,6 @@ I wrote these to follow the existing patterns — reusing the project's own
 
 **Files modified:**
 
-- `self/subcortex/providers/src/protocols/openai-api/provider.ts` (optional API key)
 - `self/subcortex/providers/src/provider-definitions.ts` (generated)
 - `self/subcortex/providers/src/provider-adapters.ts` (generated)
 - `self/subcortex/providers/src/provider-factories.ts` (generated)
@@ -353,24 +355,50 @@ I wrote these to follow the existing patterns — reusing the project's own
 - `self/subcortex/providers/src/__tests__/provider-pipeline-integration.test.ts`
 - `self/subcortex/providers/src/__tests__/adapter-resolver.test.ts`
 
+The shared `protocols/openai-api/provider.ts` is **not** modified — the keyless
+path is handled entirely inside the vLLM leaf factory via the `'no-auth'`
+placeholder, matching the merged llama.cpp leaf.
+
 ---
 
 ## Pull Request
 
+**PR:** [#417 — feat(providers): add vLLM provider leaf (#317)](https://github.com/orthogonalhq/nous-core/pull/417)
+
 **PR Target Branch:** `feat/contributor-friendly-inference-provider-surface`
-(per the issue's 2026-06-18 integration note)
+(the integration branch the maintainer designated on #317, and the same base the
+merged llama.cpp [#403] and Groq [#404] leaves used — not `dev` or `main`).
 
-**Status:** Not yet opened. Before opening the PR I want to rebase onto the
-integration branch and reconcile the `wellKnownProviderId` guidance (derive from
-`vendorKey` instead of hand-authoring), since the branch I implemented against
-still uses the older hand-authored pattern. The implementation and tests are
-complete and green; this is the one item left before submitting.
+**Status:** Open, awaiting maintainer review. Opened 2026-06-28 against the
+upstream repo (`orthogonalhq/nous-core`) from my fork
+(`skonda29/nous-core:feat/vllm-provider-317-leaf`). The maintainer (@atlamors)
+was @mentioned on both the PR and issue #317.
 
-**Planned PR description:** Adds vLLM as a provider for nous-core. vLLM serves an
-OpenAI-compatible API, so this reuses the shared chat-completions protocol rather
-than custom code, and adds an optional API key so self-hosted servers work
-without credentials (without touching `IModelProvider` or `TextModelInputSchema`).
-The leaf is registered through the generator, and 273 provider tests pass.
+**Summary:** Adds vLLM as a certified provider leaf. vLLM serves an
+OpenAI-compatible API, so the leaf reuses the shared chat-completions
+protocol/adapter rather than custom code. It is local (`isLocal: true`,
+`providerClass: 'local_text'`) and works without an API key by default: the
+factory passes a `'no-auth'` placeholder (the pattern the maintainer explicitly
+accepted on the llama.cpp PR) and forwards a real bearer token when
+`VLLM_API_KEY` is set. The built-in id derives from `vendorKey` (not
+hand-authored), catalogs are regenerated via the generator, and the shared
+`ChatCompletionsProvider` / `IModelProvider` / `TextModelInputSchema` are
+unchanged. 378 provider tests pass; typecheck and lint are green.
+
+---
+
+## Maintainer Feedback Log
+
+| Date | Source | Feedback / Guidance | My Response | Commit / Ref |
+|------|--------|---------------------|-------------|--------------|
+| 2026-06-11 | @atlamors on #317 | The original `IModelProvider` file path is superseded; implement as a certified provider leaf under `providers/<vendor>/`, target `feat/contributor-friendly-inference-provider-surface` (not `dev`/`main`), reuse `protocols/openai-api`, don't hand-edit generated catalogs. | Implemented the leaf under `providers/vllm/`, reused the shared protocol, regenerated catalogs via `generate:providers`, and opened the PR against the integration branch. | PR #417, commit `69f9914a` |
+| 2026-06-18 | @atlamors on #317 | Integration branch updated: leaves use `ProviderDefinitionLeaf`, built-in ids derive from `vendorKey`, leaves should **not** hand-author `wellKnownProviderId`. | Rebased onto the updated integration branch and removed the hand-authored id; the id now derives from `vendorKey`. | commit `69f9914a` |
+| 2026-06-23 | Merged llama.cpp PR [#403](https://github.com/orthogonalhq/nous-core/pull/403) (maintainer merge note) | Maintainer accepted the `'no-auth'` placeholder key as the keyless local-provider approach, since the shared provider has no clean no-auth mode yet; flagged `nativeToolUse` capability ambiguity as a project-side follow-up. | Adopted the same `'no-auth'` placeholder pattern instead of modifying the shared provider; matched `nativeToolUse: true` to llama.cpp and flagged the Groq inconsistency in my PR description for the maintainer to decide. | commit `69f9914a`, PR #417 description |
+| 2026-06-28 | PR #417 opened | Awaiting review — @mentioned @atlamors on the PR and issue #317. | — | PR #417 |
+
+> The dates above reflect the issue-thread guidance and merged-PR precedent I
+> incorporated. This log will be updated with line-level review comments and my
+> responses (with commit refs) as the PR is reviewed.
 
 ---
 
@@ -383,25 +411,45 @@ how a generator builds the aggregate catalogs from those leaves — and that you
 never hand-edit the generated files. I also got a much clearer picture of how an
 adapter (the request/response shape) is separate from the provider (the
 transport), which is why vLLM can reuse OpenAI's adapter while still being its
-own provider.
+own provider. Reconciling onto the integration branch taught me the difference
+between `ProviderDefinitionLeaf` (metadata only, id derived centrally from
+`vendorKey`) and the older hand-authored definition, and why centralizing id
+derivation removes a whole class of copy-paste mistakes.
 
 ### Challenges Overcome
 
 The most useful lesson was that "add a provider" touches more places than the
 obvious list. One hard-coded roster failed at compile time and only `tsc` caught
-it; another failed at runtime and only `vitest` caught it. Now I run both and
-grep for every place that enumerates providers or adapters. Tracing the "unknown
-vendor" log also taught me to confirm whether a warning is actually functional
-before changing shared code to silence it — in this case it wasn't, and changing
-it would have broken a shared test and gone out of scope.
+it (the type-level exact-union assertion); others failed at runtime and only
+`vitest` caught them. Now I run both, plus `check:generated`, and grep for every
+place that enumerates providers or adapters. The harder, more valuable challenge
+was *not over-engineering the fix*: my Phase II plan was to modify the shared
+`ChatCompletionsProvider` to make auth optional, but reading the merged
+llama.cpp PR showed the project had already settled on a contained `'no-auth'`
+placeholder at the leaf level. Choosing the established pattern over my own
+shared-code change kept the PR small, low-risk, and consistent with precedent.
 
 ### What I'd Do Differently Next Time
 
-I'd run the **full** test suite (not just the files I expected to change) right
-after the first implementation pass, to catch hard-coded roster assumptions
-sooner. I'd also pin down the exact target branch and its conventions
-(`wellKnownProviderId` handling) before writing code, so I don't have to
-reconcile it at the end.
+I'd pin down the exact target branch and study the most recently merged PRs in
+that area *before* writing code, instead of building against an older branch and
+reconciling at the end. Reading #403 and #404 first would have pointed me
+straight at the `'no-auth'` pattern and the `vendorKey`-derived id, saving a
+rework pass. I'd also run the **full** test suite right after the first
+implementation pass to surface hard-coded roster assumptions sooner.
+
+### Teachable Insight (for future cohorts)
+
+**Before implementing, find the most recently merged PR that did the same kind
+of thing and copy its shape — including its accepted imperfections.** In a young,
+fast-moving repo, the "right" pattern is whatever the maintainer last merged, not
+necessarily what the docs or the original issue say. The merged llama.cpp leaf
+told me three things the issue text didn't: keyless local servers use a
+`'no-auth'` placeholder (not a shared-provider change), ids derive from
+`vendorKey`, and a known capability ambiguity (`nativeToolUse`) was acceptable to
+the maintainer as a tracked follow-up. Matching an accepted PR is the single
+highest-signal way to get your own PR merged — and where you intentionally
+diverge, say so explicitly in the description so the reviewer can decide quickly.
 
 ---
 
@@ -416,7 +464,10 @@ reconcile it at the end.
   https://docs.nue.orthg.nl/docs/development/provider-adapters/testing-checklist
 - vLLM OpenAI-compatible server docs: https://docs.vllm.ai/
 - Existing provider references:
-  - `self/subcortex/providers/src/providers/ollama/` (local provider shape)
-  - `self/subcortex/providers/src/providers/openai/`
+  - `self/subcortex/providers/src/providers/llama-cpp/` (local OpenAI-compatible server — merged PR #403)
+  - `self/subcortex/providers/src/providers/groq/` (keyed OpenAI-compatible leaf — merged PR #404)
   - `self/subcortex/providers/src/protocols/openai-api/`
+- Merged precedent PRs I modeled the contribution on:
+  - [#403 — llama.cpp provider leaf](https://github.com/orthogonalhq/nous-core/pull/403)
+  - [#404 — Groq model provider leaf](https://github.com/orthogonalhq/nous-core/pull/404)
 - Maintainer guidance from @atlamors on issue #317
