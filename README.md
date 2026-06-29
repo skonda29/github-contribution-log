@@ -8,6 +8,8 @@
 
 **Status:** Phase IV Complete — PR [#417](https://github.com/orthogonalhq/nous-core/pull/417) open against upstream
 
+**Other contributions:** [Contribution 2 — Azure OpenAI Model Provider (#304)](contribution-2-azure-openai-provider.md) (Phase I — requested)
+
 ---
 
 ## Why I Chose This Issue
