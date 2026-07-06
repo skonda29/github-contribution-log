@@ -6,7 +6,7 @@
 
 **Issue:** https://github.com/orthogonalhq/nous-core/issues/304
 
-**Status:** Phase I — Issue selected, requested to take it up (2026-06-28)
+**Status:** Phase II — Reproduced & Planned (2026-07-06)
 
 ---
 
@@ -82,6 +82,18 @@ issue will need to close.
 
 ---
 
+## Phase II: Reproduce & Plan (Completed 2026-07-06)
+
+**Detailed plan:** `self/subcortex/providers/docs/PHASE_II_304.md` (committed to `feat/azure-openai-provider-304-leaf`)
+
+**Summary of findings:**
+- Confirmed Azure OpenAI is not registered and that attempts to use the existing `openai` leaf fail due to URL and authentication mismatches.
+- Identified the root cause as a limitation in the shared `ChatCompletionsProvider`'s handling of URL structure (deployment name, `api-version` query parameter) and auth headers (`Authorization: Bearer` vs `api-key`).
+- Determined that a custom `implementation.ts` for Azure OpenAI is necessary, leveraging the shared `chat-completions` adapter for request/response parsing.
+- Developed a detailed UMPIRE plan for implementation, including new files, required modifications, and review criteria.
+
+---
+
 ## Initial Plan (to be refined in Phase II)
 
 Based on what I built for vLLM, the high-level plan is:
@@ -117,7 +129,7 @@ Based on what I built for vLLM, the high-level plan is:
   prior work on the vLLM provider (#317):
   > "Hi @atlamors, I previously worked on Adapter: vLLM Model Provider #317 and
   > would like to take up this issue and get started."
-- Awaiting maintainer acknowledgment / assignment before starting Phase II.
+- **2026-07-06** — Completed Phase II: Reproduction & Plan, including detailed `PHASE_II_304.md` document and pushed to my fork.
 
 ---
 
