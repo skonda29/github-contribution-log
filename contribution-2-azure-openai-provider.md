@@ -227,6 +227,7 @@ I followed the existing test files (mostly `perplexity-provider.test.ts` and `ch
 | 2026-06-28 | — | Asked to take the issue. | Started reproduction while waiting. | #304 comment |
 | 2026-06-30 | `git blame` on `provider.ts:97`, `provider-definition.ts:34` | The refactor that added the `raw` scheme to the schema left the shared provider hard-coding bearer. | Told me the header fix in the shared provider was the intended direction. | — |
 | 2026-07-08 | @atlamors on #304 | Narrowed it to a **BYOK connector only** (endpoint + key + deployment name as the model), excluded Foundry / Entra / quota / routing / fallback / billing (those go to #421), and asked me to flag protocol-boundary issues in the PR. Assigned me. | Built exactly that scope; `config.modelId` = deployment name; descope written into `definition.ts`; only the header changed centrally, URL stayed in the leaf. | `d10f1379`, `544e9c0d`, `9e8dd7ea` |
+| 2026-07-10 | @atlamors on #304 | Acknowledged my update — "Looking forward to the PR." | Confirmed I'd started under the narrowed scope and had checked sibling leaf PRs (#424, #419, #420) for review issues to avoid (doubled `/v1/v1` path, adapterKey collisions); neither applies here. | #304 comment |
 
 ---
 
@@ -235,9 +236,11 @@ I followed the existing test files (mostly `perplexity-provider.test.ts` and `ch
 - **2026-06-28** — Commented on #304 asking to take it, referencing my vLLM work.
 - **2026-07-08** — @atlamors narrowed the scope and assigned me.
 - **2026-07-09** — Built Phase III, got the suite green (473), pushed the branch.
-- **2026-07-09** — Replied on [#304](https://github.com/orthogonalhq/nous-core/issues/304) to confirm the narrowed BYOK scope and summarize what I pushed:
+- **2026-07-10** — Replied on [#304](https://github.com/orthogonalhq/nous-core/issues/304) confirming I'd started with the narrowed scope in mind, and that I'd checked the other in-flight leaf PRs to avoid repeating issues already caught in their reviews:
 
-  > Thanks @atlamors, the narrowed BYOK scope makes sense and works for me. Quick summary of what's on `feat/azure-openai-provider-304`: Azure OpenAI as a direct BYOK connector — the user supplies the endpoint, `AZURE_OPENAI_API_KEY`, and the deployment name (used as the model value). It reuses the shared chat-completions protocol; the only shared-code change is a backwards-compatible `api-key` header option on `ChatCompletionsProvider` (the one protocol-boundary bit that couldn't live in the leaf). The deployment URL (`/openai/deployments/{deployment}/chat/completions?api-version=…`) is built in the leaf factory since `completionsPath` is already treated as an opaque string. It fails closed on credentials (no OpenAI-key fallback), derives its id from `vendorKey`, and regenerates the catalogs via the generator. Foundry / Entra ID / quota / regional routing / fallback / billing are all left out per #421. 473 provider tests pass. I'll open the PR against the integration branch and flag the header change in the description. Anything you'd like changed before I open it?
+  > Hi @atlamors, thank you for the guidance. I started working on this already keeping your suggestions in mind. Also checked the other leaf PRs (#424, #419, #420) to dodge issues already caught in review there (doubled /v1/v1 path, adapterKey collisions) — neither applies here, wanted good to confirm.
+
+  @atlamors replied: *"Awesome, thanks @skonda29. Looking forward to the PR."*
 
 - **Check-in form:** submitted with **"Phase III Complete"** marked.
 - **Next:** open the PR with the header change and the #421 descope both called out.
@@ -253,6 +256,7 @@ A few things I did that weren't strictly required:
 - **Made my own shared-code change smaller.** My Phase II plan wanted URL templating in the shared provider too; once I saw `completionsPath` is already opaque, I moved the URL into the leaf and only changed the header centrally.
 - **Used the project's own test patterns.** I exported `buildAzureCompletionsPath` so it could be unit-tested directly, copied the mocked-`fetch` style from the existing tests, and added a regression test proving the default Bearer behavior still works for the other leaves.
 - **Handled real Azure quirks.** URL-encoded deployment names, overridable api-version, GA default — all with tests.
+- **Checked the other in-flight leaf PRs first.** Before opening mine I read the sibling provider PRs (#424, #419, #420) to see what reviewers had already flagged — a doubled `/v1/v1` path and adapterKey collisions. Neither applies to Azure, but confirming that up front means I'm not re-introducing a bug the maintainer already had to point out on someone else's PR.
 
 ---
 
