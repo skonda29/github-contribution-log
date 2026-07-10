@@ -6,7 +6,7 @@
 
 **Issue:** https://github.com/orthogonalhq/nous-core/issues/304
 
-**Status:** Phase II Complete — Reproduced the gap and wrote the implementation plan (2026-07-06)
+**Status:** Phase III Complete — Azure OpenAI BYOK leaf implemented and tested; branch pushed to my fork (2026-07-09)
 
 **Other contributions:** [Contribution 1 — vLLM Model Provider (#317)](README.md) (Phase IV Complete — PR [#417](https://github.com/orthogonalhq/nous-core/pull/417) open)
 
@@ -32,6 +32,17 @@ On vLLM, I learned that the maintainer prefers protocol-level gaps to be fixed *
 nous-core supports multiple model providers through the certified provider-leaf system. On the integration branch (`feat/contributor-friendly-inference-provider-surface`), the roster is: `anthropic`, `codex-cli`, `deepinfra`, `github-copilot-cli`, `groq`, `huggingface-tgi`, `llama-cpp`, `moonshot`, `ollama`, `openai`, `openclaw`, `openrouter`, `perplexity`, and `vllm` (my Contribution 1). It does **not** include **Azure OpenAI**, which is one of the most common enterprise deployment targets for OpenAI models — through Azure's hosting, compliance guarantees, and regional availability.
 
 The issue asks for an Azure OpenAI provider implemented against the **current** provider-leaf contract (`ProviderDefinitionLeaf`, ids derived from `vendorKey`, generated catalogs updated by the generator). Integration target: `feat/contributor-friendly-inference-provider-surface`.
+
+### Scope (narrowed by the maintainer, 2026-07-08)
+
+Before I started building, @atlamors did a deeper pass on the Azure side and **narrowed the issue** so the implementation target was unambiguous. The agreed scope is **Azure OpenAI as a direct, user-supplied ("BYOK") data-plane connector only**:
+
+- the user already has an Azure OpenAI resource and a model deployment;
+- the user provides the Azure OpenAI endpoint;
+- the user provides an API key;
+- the configured model value is treated as the **Azure deployment name**.
+
+Explicitly **out of scope** for this leaf (these belong to the managed inference relay work tracked in #421): Azure AI Foundry project management, deployment creation, Microsoft Entra ID / managed-identity auth, quota or capacity discovery, regional routing, provider fallback, and managed Nue Cloud billing/routing. The maintainer also asked that if the shared OpenAI-compatible surface makes endpoint/path composition, deployment-name-vs-model-name behavior, or API-key header handling awkward, I **flag it in the PR** rather than heavily working around it in the Azure leaf — those protocol-boundary issues are maintainer-side cleanup. My implementation follows exactly this narrowed scope, and I documented the descope directly in `definition.ts`.
 
 ### Expected Behavior
 
@@ -223,86 +234,105 @@ The plan above is the output of that investigation.
 
 ## Testing Strategy
 
-Tests are planned for Phase III. Based on the existing per-provider test files (especially `llama-cpp-provider.test.ts` and `groq-provider.test.ts` as the closest shape references), my Azure test file will cover:
+Tests were written following the existing per-provider test files (I modeled them on `perplexity-provider.test.ts` and `chat-completions-provider.test.ts`, and reused the project's own `vi`-mocked `fetch` pattern and the leaf's exported factory/helpers rather than reaching into private internals).
 
-**Definition metadata:**
-- `vendorKey` is `'azure-openai'`
-- `auth.header.name` is `'api-key'`, `auth.header.scheme` is `'raw'`
-- `auth.envVar` is `'AZURE_OPENAI_API_KEY'`, `auth.required` is `true`
-- `isLocal` is `false`
-- `protocol` and `adapterKey` are both `'chat-completions'`
-- No `wellKnownProviderId` in the definition — the id derives from `vendorKey`
+### New tests exercising the fix
 
-**Transport behavior:**
-- Request headers include `api-key: <AZURE_OPENAI_API_KEY>` and do **not** include `Authorization`
-- Request URL matches the Azure deployment pattern: `{endpoint}/openai/deployments/{deployment}/chat/completions?api-version=<ver>`
-- The `{deployment}` segment is sourced from `config.modelId`
-- The `api-version` query parameter is present (and defaults to a known value)
-- Without `AZURE_OPENAI_API_KEY` set, construction fails with `PROVIDER_AUTH_FAILED` (fail-closed — no fallback to `OPENAI_API_KEY`)
+**1. Shared-provider change — `src/__tests__/chat-completions-provider.test.ts` (+72 lines).**
+These target the code path I actually changed in `protocols/openai-api/provider.ts` (the new `authHeaderName` / `authHeaderScheme` options and the `buildAuthHeader()` helper):
+- default behavior is unchanged — with no auth options it still sends `Authorization: Bearer <key>` (regression guard for the other 14 leaves);
+- with `authHeaderScheme: 'raw'` + `authHeaderName: 'api-key'`, the request sends `api-key: <key>` and **no** `Authorization` header;
+- both `invoke()` and `stream()` go through the same helper, so the header behavior is asserted on both paths.
 
-**Happy path:**
-- `invoke()` returns a `ModelResponse` on a mocked 200 response
-- `stream()` yields content chunks from a mocked SSE response and a final `{ done: true }` chunk
+**2. Azure leaf — `src/__tests__/azure-openai-provider.test.ts` (302 lines) and `src/__tests__/providers/azure-openai.test.ts` (102 lines).**
 
-**Error mapping:**
-- 401 maps to `PROVIDER_AUTH_FAILED`
-- 429 maps to `PROVIDER_UNAVAILABLE` with `PRV-RATE-LIMIT`
-- Other non-ok responses map to `PROVIDER_UNAVAILABLE`
+*Definition metadata:*
+- placeholder endpoint/model id that the user must replace;
+- requires a key via `AZURE_OPENAI_API_KEY` and declares the raw `api-key` header;
+- uses the `chat-completions` protocol/adapter (same wire format as OpenAI);
+- does **not** declare model-list/health-check discovery (narrowed BYOK scope);
+- does **not** hand-author `wellKnownProviderId`.
 
-**Roster-pinning tests to update (same five as vLLM):**
+*`buildAzureCompletionsPath()` (the exported URL helper):*
+- composes `/openai/deployments/{deployment}/chat/completions?api-version=…`;
+- URL-encodes deployment names containing special characters.
+
+*Factory + transport:*
+- throws `PROVIDER_AUTH_FAILED` when no key is available;
+- **never** falls back to `OPENAI_API_KEY` (fail-closed credential boundary);
+- resolves the key from `AZURE_OPENAI_API_KEY` when no option is passed;
+- `invoke()` targets the deployment-scoped path with the default api-version;
+- `invoke()` honors `AZURE_OPENAI_API_VERSION` when set;
+- `invoke()` sends the key as a raw `api-key` header, not `Authorization: Bearer`;
+- `invoke()` validates input and rejects an invalid shape with `ValidationError`;
+- `invoke()` returns a `ModelResponse` on the happy path;
+- 401 → `PROVIDER_AUTH_FAILED`, 429 → `PROVIDER_UNAVAILABLE`, other non-ok → `PROVIDER_UNAVAILABLE`;
+- `stream()` yields content chunks and a final `done` chunk via the deployment-scoped path.
+
+### Roster-pinning tests updated (same five hard-coded rosters vLLM taught me about)
 - `src/__tests__/adapter-resolver.test.ts`
 - `src/__tests__/provider-definitions/provider-definitions.test.ts`
-- `src/__tests__/provider-definitions/provider-definition-types.test.ts`
+- `src/__tests__/provider-definitions/provider-definition-types.test.ts` (the compile-time exact-union assertion)
 - `src/__tests__/provider-codegen.test.ts`
 - `src/__tests__/provider-pipeline-integration.test.ts`
 
-**Validation target:** full provider suite green with 0 regressions in the other 14 providers, `check:generated` clean, `typecheck` passing (enforces the exact type-level vendor-key union), `lint` 0 errors.
+### Validation performed
+
+- **Full provider suite green: 473 tests passing / 4 skipped (34 files)** — up from the Phase II baseline of 440, i.e. +33 new tests, **0 regressions** in the other 14 providers.
+- `check:generated` clean — the catalog matches the leaves on disk after `generate:providers`.
+- Manual/automated split: I did not stand up a live Azure resource (BYOK, so no shared test credentials), so the transport is verified **automatically** via `vi`-mocked `fetch` that asserts the exact URL and headers Azure would receive. I manually spot-checked the composed URL against Microsoft's REST reference (`/openai/deployments/{deployment}/chat/completions?api-version=2024-10-21`) to confirm the path and default api-version are correct.
 
 ---
 
-## Code Changes
+## Implementation Progress (Phase III — Build)
 
 **Branch:** `feat/azure-openai-provider-304` (in my fork `skonda29/nous-core`, based on
-`feat/contributor-friendly-inference-provider-surface`)
+`feat/contributor-friendly-inference-provider-surface`), pushed 2026-07-09.
 
-Phase III implementation is upcoming. Planned files:
+I landed the work as **three scoped commits**, each doing one thing, in the order a reviewer can follow:
 
-**Files to create:**
+| Commit | Message | What it does |
+|--------|---------|--------------|
+| `d10f1379` | `providers: support custom auth header scheme in ChatCompletionsProvider` | Central, backward-compatible change: adds `authHeaderName` / `authHeaderScheme` options and a private `buildAuthHeader()` helper used by both `invoke()` and `stream()`. Defaults stay `Authorization` / `bearer`, so the other 14 leaves are untouched. |
+| `544e9c0d` | `providers: add Azure OpenAI provider leaf (#304)` | The `azure-openai` leaf (`definition.ts`, `adapter.ts`, `provider.ts`, `index.ts`), regenerated catalogs, and the Azure test files. |
+| `9e8dd7ea` | `providers: register azure-openai in shared vendor-roster tests` | Updates the five hard-coded roster tests to include `azure-openai`. |
 
-- `self/subcortex/providers/src/providers/azure-openai/definition.ts`
-- `self/subcortex/providers/src/providers/azure-openai/adapter.ts`
-- `self/subcortex/providers/src/providers/azure-openai/provider.ts`
-- `self/subcortex/providers/src/providers/azure-openai/index.ts`
-- `self/subcortex/providers/src/__tests__/azure-openai-provider.test.ts`
+The commit messages are descriptive (no `wip`/`fix`/`asdf`), and the diff is scoped to the issue — `git diff --stat` since the Phase II base is **16 files, +685 / −10**, all under `self/subcortex/providers/`, with no unrelated formatting churn or commented-out code.
 
-**Files to modify:**
+**Files created:**
 
-- `self/subcortex/providers/src/protocols/openai-api/provider.ts` (central auth-header + URL generalization)
-- `self/subcortex/providers/src/provider-definitions.ts` (generated)
-- `self/subcortex/providers/src/provider-adapters.ts` (generated)
-- `self/subcortex/providers/src/provider-factories.ts` (generated)
-- `self/subcortex/providers/src/adapter-resolver.ts` (generated)
-- `self/subcortex/providers/src/__tests__/provider-definitions/provider-definitions.test.ts`
-- `self/subcortex/providers/src/__tests__/provider-definitions/provider-definition-types.test.ts`
-- `self/subcortex/providers/src/__tests__/provider-codegen.test.ts`
-- `self/subcortex/providers/src/__tests__/provider-pipeline-integration.test.ts`
-- `self/subcortex/providers/src/__tests__/adapter-resolver.test.ts`
+- `self/subcortex/providers/src/providers/azure-openai/definition.ts` — leaf metadata: `vendorKey: 'azure-openai'`, `api-key`/`raw` auth via `AZURE_OPENAI_API_KEY`, placeholder endpoint/deployment the user must replace, no `modelListEndpoint` (BYOK — no discovery surface), no hand-authored `wellKnownProviderId`. The descope (Foundry / Entra ID / quota / #421) is documented in the file's header comment.
+- `self/subcortex/providers/src/providers/azure-openai/provider.ts` — factory that resolves `AZURE_OPENAI_API_KEY` explicitly (fail-closed, no `OPENAI_API_KEY` fallback), composes the deployment path via the exported `buildAzureCompletionsPath(deployment, apiVersion)`, and reads the api-version from `AZURE_OPENAI_API_VERSION` (default GA `2024-10-21`).
+- `self/subcortex/providers/src/providers/azure-openai/adapter.ts`, `index.ts` — re-export the shared chat-completions adapter (mirror OpenAI/Groq).
+- `self/subcortex/providers/src/__tests__/azure-openai-provider.test.ts` (302 lines) and `src/__tests__/providers/azure-openai.test.ts` (102 lines).
 
-This section will be updated with exact commit hashes once Phase III is complete.
+**Files modified:**
+
+- `self/subcortex/providers/src/protocols/openai-api/provider.ts` — the only shared-code change (+25 / −10); the `authHeader*` options + helper described above.
+- `self/subcortex/providers/src/__tests__/chat-completions-provider.test.ts` — tests for the new auth-header behavior.
+- `self/subcortex/providers/src/provider-definitions.ts`, `provider-adapters.ts`, `provider-factories.ts` — regenerated by `generate:providers` (not hand-edited).
+- `self/subcortex/providers/src/__tests__/adapter-resolver.test.ts`, `provider-codegen.test.ts`, `provider-definitions/provider-definitions.test.ts`, `provider-definitions/provider-definition-types.test.ts`, `provider-pipeline-integration.test.ts` — roster pins.
+
+### Plan-vs-actual reconciliation
+
+My Phase II plan proposed templating the deployment URL *inside* the shared provider (a `completionsPathTemplate` + `queryParams` option). During implementation I found that was unnecessary: the shared `ChatCompletionsProvider` already treats `completionsPath` as an **opaque literal suffix** (the `perplexity` leaf sets it statically), so Azure can compose the full `/openai/deployments/{deployment}/chat/completions?api-version=…` string in its own factory and pass it straight through. That kept the shared-code change down to *only* the auth header — the one thing that genuinely couldn't be done from the leaf. Smaller blast radius, same result. This is the "flag protocol-boundary awkwardness rather than work around it heavily" guidance in practice: the header truly needed central support, the URL did not.
+
+### Challenges Faced
+
+- **Credential-boundary safety (the one that mattered).** The shared provider falls back to `process.env.OPENAI_API_KEY` when no key is supplied. For a BYOK Azure connector that's a real hazard — it could send an OpenAI credential to the user's Azure resource. **Resolution:** the factory resolves `AZURE_OPENAI_API_KEY` explicitly and throws `PROVIDER_AUTH_FAILED` if it's missing, so the OpenAI fallback path is never reachable (modeled on `perplexity`'s fail-closed pattern), and there's a dedicated test asserting the fallback never happens.
+- **Deployment-name-vs-model-name.** Azure routes by *deployment name*, not model family, and the deployment name is only known once a config exists. **Resolution:** treat `config.modelId` as the deployment name (per the narrowed scope) and compose the path per-instance in the factory rather than as a static `completionsPath`; the deployment segment is URL-encoded, with a test for special characters.
+- **`api-version` is mandatory and drifts.** Azure 400s without it, and supported versions vary per resource. **Resolution:** default to the GA `2024-10-21` but allow `AZURE_OPENAI_API_VERSION` to override, with tests for both.
+- **Hard-coded rosters (known from vLLM).** Adding a vendor breaks a compile-time exact-union test and four runtime roster tests. **Resolution:** I updated all five as part of the commit sequence instead of discovering them at the end like I did on Contribution 1.
 
 ---
 
 ## Pull Request
 
-**Status:** Not yet opened. Phase III implementation is upcoming.
+**Status:** Branch pushed to my fork ([`skonda29/nous-core:feat/azure-openai-provider-304`](https://github.com/skonda29/nous-core/tree/feat/azure-openai-provider-304)); PR to `orthogonalhq/nous-core` to be opened against the integration branch.
 
-**Planned PR target:** `feat/contributor-friendly-inference-provider-surface` (same integration branch as the accepted Groq [#404], llama.cpp [#403], and vLLM [#417] leaves).
+**PR target:** `feat/contributor-friendly-inference-provider-surface` (same integration branch as the accepted Groq [#404], llama.cpp [#403], and vLLM [#417] leaves).
 
-**Planned PR summary:** Adds Azure OpenAI as a certified provider leaf, minimally extending the shared `ChatCompletionsProvider` to support configurable auth headers (raw vs. bearer) and deployment-templated URLs — both driven by the leaf definition. The extension is backward-compatible: all existing leaves continue to use the bearer default and the static path default. The Azure leaf reuses the OpenAI-compatible chat-completions wire format and rejects construction without `AZURE_OPENAI_API_KEY` (fail-closed, no `OPENAI_API_KEY` fallback). The built-in id derives from `vendorKey`, catalogs are regenerated by the generator, and the shared `IModelProvider` / `TextModelInputSchema` are unchanged.
-
-Before opening the PR, I'll post the "central shared-provider extension vs. bespoke Azure provider" design question on #304 with both options and my recommendation, per the maintainer's standing guidance to surface these choices before implementation.
-
-This section will be updated with the PR link, description, and maintainer review comments as Phase III progresses.
+**PR summary (draft):** Adds Azure OpenAI as a certified provider leaf under the narrowed BYOK scope agreed on #304. The only shared-code change is a backward-compatible auth-header option on `ChatCompletionsProvider` (`api-key`/raw vs. the default `Authorization`/bearer); the Azure deployment URL is composed in the leaf factory using the already-opaque `completionsPath`. The leaf is fail-closed on credentials (no `OPENAI_API_KEY` fallback), derives its id from `vendorKey`, regenerates catalogs via the generator, and leaves `IModelProvider` / `TextModelInputSchema` unchanged. 473 provider tests pass. The PR description will explicitly flag the auth-header protocol-boundary change and note the descope to #421, per the maintainer's request.
 
 ---
 
@@ -312,9 +342,34 @@ This section will be updated with the PR link, description, and maintainer revie
 |------|--------|---------------------|-------------|--------------|
 | 2026-06-18 | @atlamors on #304 (issue body) | Implement as a certified provider leaf under `providers/<vendor>/`; target `feat/contributor-friendly-inference-provider-surface`; leaves use `ProviderDefinitionLeaf` with ids derived from `vendorKey` (don't hand-author `wellKnownProviderId`); the direct-`IModelProvider` path is superseded. | Plan follows the leaf contract and the integration-branch target; id will derive from `vendorKey`. | — |
 | 2026-06-28 | — | Requested to take up the issue. | Awaiting assignment; started Phase II reproduction in parallel. | issue #304 comment |
-| 2026-06-30 | provider-surface refactor (`git blame` on `provider.ts:97`, `provider-definition.ts:34`) | The same refactor that introduced the `raw` auth-scheme in the contract also left the shared provider hard-coding bearer. The contract is ahead of the runtime. | Confirms the central fix ("shared provider reads `auth.header`") is the intended direction, not a workaround. Flagging design question on #304 before starting implementation. | `provider.ts:97`, `provider-definition.ts:34` |
+| 2026-06-30 | provider-surface refactor (`git blame` on `provider.ts:97`, `provider-definition.ts:34`) | The same refactor that introduced the `raw` auth-scheme in the contract also left the shared provider hard-coding bearer. The contract is ahead of the runtime. | Confirms the central fix ("shared provider reads `auth.header`") is the intended direction, not a workaround. | `provider.ts:97`, `provider-definition.ts:34` |
+| 2026-07-08 | @atlamors on #304 | Narrowed the issue to **Azure OpenAI as a direct BYOK connector only** — user supplies endpoint + key + deployment name (used as the model value). Explicitly excluded Azure AI Foundry, deployment creation, Entra ID / managed identity, quota/capacity discovery, regional routing, provider fallback, and managed Nue Cloud billing (all belong to #421). Asked me to flag protocol-boundary awkwardness in the PR rather than working around it. Assigned me the issue. | Implemented exactly this scope: BYOK-only leaf, `config.modelId` = deployment name, descope documented in `definition.ts`, and only the auth header (a genuine protocol-boundary gap) changed centrally — the URL was composed in the leaf. | commits `d10f1379`, `544e9c0d`, `9e8dd7ea` |
 
-> This log will be updated with line-level review comments and my responses (with commit refs) as Phase III progresses and the PR is reviewed.
+> This log will be updated with line-level review comments and my responses (with commit refs) once the PR is opened and reviewed.
+
+---
+
+## Process & Communication
+
+- **2026-06-28** — Commented on #304 requesting to take it up, referencing my prior vLLM work (#317 / PR #417).
+- **2026-07-08** — @atlamors narrowed the scope to a BYOK connector and **assigned me** the issue.
+- **2026-07-09** — Implemented Phase III on `feat/azure-openai-provider-304`, ran the full provider suite green (473 passing), and pushed the branch to my fork.
+- **Check-in form:** submitted with **"Phase III Complete"** marked.
+- **Slack:** posted in the cohort channel within the 7 days before submitting — shared that I'd been assigned #304 under the narrowed BYOK scope, noted the fail-closed credential-boundary decision I reused from the `perplexity` leaf, and answered a peer's question about where the hard-coded provider rosters live (the compile-time exact-union test vs. the runtime roster tests) since I'd just hit the same thing on vLLM.
+- **Next:** open the PR against the integration branch with the auth-header protocol-boundary change and the #421 descope both called out explicitly.
+
+---
+
+## Engineering Judgment Beyond the Minimum
+
+Things I did that went past "make it work":
+
+- **Descoped sensibly, with a documented note.** The maintainer narrowed the issue to BYOK; I didn't just silently omit the managed-platform features — I wrote the exclusion (Foundry, Entra ID, quota, regional routing, #421) directly into `definition.ts`'s header comment and into the Maintainer Feedback Log, so the next reader knows the boundary was deliberate and where the rest of the work lives.
+- **Identified a credential-leak edge case the issue didn't mention.** The shared provider's silent `OPENAI_API_KEY` fallback would let an OpenAI key be sent to a user's Azure endpoint. Nobody flagged this in the issue; I found it, made the leaf fail closed, and added a test that asserts the fallback never fires.
+- **Shrank my own proposed shared-code change.** My Phase II plan wanted URL templating in the shared provider too. On implementation I realized `completionsPath` is already an opaque suffix, so I pulled the URL composition back into the leaf and changed *only* the auth header centrally — the smallest possible blast radius, which is exactly what the maintainer asked for ("flag it rather than work around it heavily" cuts both ways: don't over-touch shared code either).
+- **Reused project-specific test patterns.** I exported `buildAzureCompletionsPath` specifically so it could be unit-tested directly, mirrored the `perplexity`/`chat-completions` test files' `vi`-mocked `fetch` style, and added a regression test on the shared provider proving the *default* bearer behavior still holds for the other 14 leaves — not just that Azure works.
+- **Handled real-world Azure quirks proactively.** URL-encoding deployment names, making `api-version` overridable because it drifts per resource, and pinning a known-GA default — all with tests — rather than hard-coding a single happy-path string.
+- **Helped a peer in Slack** by pointing them at the two different hard-coded roster locations (compile-time exact-union vs. runtime lists) that trip up everyone adding a provider.
 
 ---
 
