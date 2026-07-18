@@ -6,7 +6,7 @@
 
 **Issue:** https://github.com/orthogonalhq/nous-core/issues/304
 
-**Status:** Phase III Complete — I built the Azure OpenAI (BYOK) leaf, wrote tests, and pushed the branch to my fork (2026-07-09)
+**Status:** Phase IV Complete — PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) open against upstream
 
 **Other contributions:** [Contribution 1 — vLLM Model Provider (#317)](README.md) (Phase IV Complete — PR [#417](https://github.com/orthogonalhq/nous-core/pull/417) open)
 
@@ -147,21 +147,25 @@ I cut the `feat/azure-openai-provider-304` branch off the integration branch, go
 
 This is where I actually wrote the code (see the Implementation Progress section below for the file-by-file details and commit hashes). Short version: one small shared-provider change for the header, the Azure leaf, regenerated catalogs, tests, and roster fixes. Full suite ended green at 473 tests.
 
+### Week 4 Progress (Phase IV — PR)
+
+Opened PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) against the integration branch. The first open showed merge conflicts because other provider leaves had landed since I branched, so I rebased, updated the roster expectations to include both `azure-openai` and the new vendors, force-pushed, and got the PR mergeable.
+
 ---
 
 ## Implementation Progress (Phase III — Build)
 
-**Branch:** `feat/azure-openai-provider-304` (my fork `skonda29/nous-core`, based on `feat/contributor-friendly-inference-provider-surface`), pushed 2026-07-09.
+**Branch:** `feat/azure-openai-provider-304` (my fork `skonda29/nous-core`, based on `feat/contributor-friendly-inference-provider-surface`).
 
-I split the work into three commits so each one does a single thing and is easy to review:
+I split the work into three commits so each one does a single thing and is easy to review. After rebasing onto the latest integration tip (other leaves had landed — gemini, mistral, qwen-code, xai), the hashes are:
 
 | Commit | Message | What it does |
 |--------|---------|--------------|
-| `d10f1379` | `providers: support custom auth header scheme in ChatCompletionsProvider` | Adds `authHeaderName` / `authHeaderScheme` + a `buildAuthHeader()` helper used by `invoke()` and `stream()`. Defaults unchanged, so the other 14 leaves aren't affected. |
-| `544e9c0d` | `providers: add Azure OpenAI provider leaf (#304)` | The `azure-openai` leaf (`definition.ts`, `adapter.ts`, `provider.ts`, `index.ts`), regenerated catalogs, and the Azure tests. |
-| `9e8dd7ea` | `providers: register azure-openai in shared vendor-roster tests` | Adds `azure-openai` to the five hard-coded roster tests. |
+| `6c703ab8` | `providers: support custom auth header scheme in ChatCompletionsProvider` | Adds `authHeaderName` / `authHeaderScheme` + a `buildAuthHeader()` helper used by `invoke()` and `stream()`. Defaults unchanged, so the other leaves aren't affected. |
+| `113d3b91` | `providers: add Azure OpenAI provider leaf (#304)` | The `azure-openai` leaf (`definition.ts`, `adapter.ts`, `provider.ts`, `index.ts`), regenerated catalogs, and the Azure tests. |
+| `a928b084` | `providers: register azure-openai in shared vendor-roster tests` | Adds `azure-openai` to the hard-coded roster tests (merged with the newly landed vendors). |
 
-The whole diff since Phase II is 16 files, +685 / −10, all under `self/subcortex/providers/` — no random formatting changes or commented-out code.
+The PR diff is scoped to the issue — all under `self/subcortex/providers/`, no random formatting changes or commented-out code.
 
 **Files I created:**
 
@@ -183,6 +187,7 @@ The whole diff since Phase II is 16 files, +685 / −10, all under `self/subcort
 - **Deployment name vs. model name.** Azure routes by deployment name, not model, and you only know it once a config exists. So I treat `config.modelId` as the deployment name and build the path per-instance (not as a static `completionsPath`), and I URL-encode it with a test for weird characters.
 - **api-version is required and changes.** Azure returns a 400 without it, and supported versions differ per resource. I defaulted to `2024-10-21` but made `AZURE_OPENAI_API_VERSION` override it, with tests for both.
 - **The hard-coded roster tests (already knew this one from vLLM).** Adding a vendor breaks one compile-time exact-union test and four runtime roster tests. This time I updated all five as part of the commits instead of getting surprised at the end.
+- **Rebase conflicts before the PR was mergeable.** By the time I opened [#425](https://github.com/orthogonalhq/nous-core/pull/425), the integration branch had moved a lot (xAI, Mistral, Gemini, Qwen Code, etc.). GitHub showed conflicts in the same roster/catalog files. I rebased onto the latest tip, merged `azure-openai` into the updated vendor lists (kept gemini/mistral/qwen-code/xai), force-pushed, and the PR went mergeable.
 
 ---
 
@@ -211,11 +216,13 @@ I followed the existing test files (mostly `perplexity-provider.test.ts` and `ch
 
 ## Pull Request
 
-**Status:** Branch is pushed to my fork ([`skonda29/nous-core:feat/azure-openai-provider-304`](https://github.com/skonda29/nous-core/tree/feat/azure-openai-provider-304)). I still need to open the PR against the integration branch.
+**PR:** [#425 — feat(providers): add Azure OpenAI BYOK provider leaf (#304)](https://github.com/orthogonalhq/nous-core/pull/425)
 
-**PR target:** `feat/contributor-friendly-inference-provider-surface` (same branch the merged Groq [#404], llama.cpp [#403], and my vLLM [#417] leaves used).
+**PR target:** `feat/contributor-friendly-inference-provider-surface` (same integration branch as the accepted Groq [#404], llama.cpp [#403], and my vLLM [#417] leaves — not `dev` or `main`).
 
-**What the PR will say:** Adds Azure OpenAI as a BYOK provider leaf (the narrowed scope from #304). The only shared change is a backwards-compatible auth-header option on `ChatCompletionsProvider`; the Azure URL is built in the leaf using the existing opaque `completionsPath`. Fail-closed on credentials, id derived from `vendorKey`, catalogs regenerated by the generator, `IModelProvider` / `TextModelInputSchema` untouched. 473 tests pass. I'll call out the header change and the #421 descope in the description like the maintainer asked.
+**Status:** Open, awaiting maintainer review. Opened 2026-07-17 against upstream (`orthogonalhq/nous-core`) from my fork (`skonda29/nous-core:feat/azure-openai-provider-304`). After a rebase onto the latest integration tip (to clear conflicts from newly merged leaves), the PR is mergeable.
+
+**Summary:** Adds Azure OpenAI as a certified BYOK provider leaf under the narrowed scope from #304. The only shared-code change is a backwards-compatible auth-header option on `ChatCompletionsProvider` (`api-key`/raw vs. the default `Authorization`/bearer). The Azure deployment URL is built in the leaf factory using the already-opaque `completionsPath`. Fail-closed on credentials (no `OPENAI_API_KEY` fallback), id derived from `vendorKey`, catalogs regenerated via the generator, `IModelProvider` / `TextModelInputSchema` unchanged. Foundry / Entra / quota / routing / billing left to #421. The PR description flags the header protocol-boundary change the way the maintainer asked.
 
 ---
 
@@ -226,8 +233,11 @@ I followed the existing test files (mostly `perplexity-provider.test.ts` and `ch
 | 2026-06-18 | @atlamors on #304 (issue body) | Build it as a certified leaf under `providers/<vendor>/`, target the integration branch, use `ProviderDefinitionLeaf` with ids from `vendorKey`, don't hand-author `wellKnownProviderId`, the old `IModelProvider` path is dead. | Followed all of it. | — |
 | 2026-06-28 | — | Asked to take the issue. | Started reproduction while waiting. | #304 comment |
 | 2026-06-30 | `git blame` on `provider.ts:97`, `provider-definition.ts:34` | The refactor that added the `raw` scheme to the schema left the shared provider hard-coding bearer. | Told me the header fix in the shared provider was the intended direction. | — |
-| 2026-07-08 | @atlamors on #304 | Narrowed it to a **BYOK connector only** (endpoint + key + deployment name as the model), excluded Foundry / Entra / quota / routing / fallback / billing (those go to #421), and asked me to flag protocol-boundary issues in the PR. Assigned me. | Built exactly that scope; `config.modelId` = deployment name; descope written into `definition.ts`; only the header changed centrally, URL stayed in the leaf. | `d10f1379`, `544e9c0d`, `9e8dd7ea` |
+| 2026-07-08 | @atlamors on #304 | Narrowed it to a **BYOK connector only** (endpoint + key + deployment name as the model), excluded Foundry / Entra / quota / routing / fallback / billing (those go to #421), and asked me to flag protocol-boundary issues in the PR. Assigned me. | Built exactly that scope; `config.modelId` = deployment name; descope written into `definition.ts`; only the header changed centrally, URL stayed in the leaf. | `6c703ab8`, `113d3b91`, `a928b084` |
 | 2026-07-10 | @atlamors on #304 | Acknowledged my update — "Looking forward to the PR." | Confirmed I'd started under the narrowed scope and had checked sibling leaf PRs (#424, #419, #420) for review issues to avoid (doubled `/v1/v1` path, adapterKey collisions); neither applies here. | #304 comment |
+| 2026-07-17 | PR #425 opened | Opened against the integration branch; rebased after merge conflicts from newly landed leaves. | Awaiting review. Flagged the auth-header protocol-boundary change and the #421 descope in the PR description. | PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) |
+
+> This log will be updated with line-level review comments and my responses (with commit refs) as the PR is reviewed.
 
 ---
 
@@ -242,8 +252,9 @@ I followed the existing test files (mostly `perplexity-provider.test.ts` and `ch
 
   @atlamors replied: *"Awesome, thanks @skonda29. Looking forward to the PR."*
 
-- **Check-in form:** submitted with **"Phase III Complete"** marked.
-- **Next:** open the PR with the header change and the #421 descope both called out.
+- **2026-07-17** — Opened PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) against `feat/contributor-friendly-inference-provider-surface`. Rebased onto the latest integration tip to clear catalog/roster conflicts from newly merged leaves (xAI, Mistral, Gemini, Qwen Code), force-pushed, and confirmed the PR is mergeable.
+- **Check-in form:** submitted with **"Phase IV Complete"** / PR opened as required.
+- **Next:** respond to maintainer review comments on #425 as they come in.
 
 ---
 
