@@ -6,7 +6,7 @@
 
 **Issue:** https://github.com/orthogonalhq/nous-core/issues/304
 
-**Status:** Phase IV Complete — PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) open against upstream
+**Status:** Phase IV — PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) open; addressed maintainer change request (endpoint preservation), awaiting re-review
 
 **Other contributions:** [Contribution 1 — vLLM Model Provider (#317)](README.md) (Phase IV Complete — PR [#417](https://github.com/orthogonalhq/nous-core/pull/417) open)
 
@@ -151,19 +151,28 @@ This is where I actually wrote the code (see the Implementation Progress section
 
 Opened PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) against the integration branch. The first open showed merge conflicts because other provider leaves had landed since I branched, so I rebased, updated the roster expectations to include both `azure-openai` and the new vendors, force-pushed, and got the PR mergeable.
 
+### Maintainer review + follow-up fix
+
+On 2026-07-21 @atlamors left a **Request changes** review. The scope looked good (BYOK only, no Foundry/#421 stuff), and the deployment path / `api-key` header / fail-closed key handling were fine — but he caught a **shared-runtime** bug that made Azure unusable through the normal registry path:
+
+`ProviderRegistry.normalizeRemoteConfig()` was always overwriting the configured endpoint with `definition.defaultEndpoint`. For Azure, that default is just a placeholder (`https://your-resource.openai.azure.com`), so a real BYOK host like `https://acme-resource.openai.azure.com` got wiped before the factory ran. My factory/unit tests missed it because they call the factory directly and skip the registry.
+
+I replied on the PR agreeing it was a shared-runtime gap, then fixed it so normalization only falls back to the definition default when `config.endpoint` is absent, and added a registry-level Azure test that asserts the invoked URL uses the custom resource host (not the placeholder). Also updated two openai/anthropic proxy-endpoint tests that had been asserting the old overwrite behavior.
+
 ---
 
 ## Implementation Progress (Phase III — Build)
 
 **Branch:** `feat/azure-openai-provider-304` (my fork `skonda29/nous-core`, based on `feat/contributor-friendly-inference-provider-surface`).
 
-I split the work into three commits so each one does a single thing and is easy to review. After rebasing onto the latest integration tip (other leaves had landed — gemini, mistral, qwen-code, xai), the hashes are:
+I split the work into reviewable commits. After rebasing onto the latest integration tip (other leaves had landed — gemini, mistral, qwen-code, xai), plus the review follow-up, the hashes are:
 
 | Commit | Message | What it does |
 |--------|---------|--------------|
 | `6c703ab8` | `providers: support custom auth header scheme in ChatCompletionsProvider` | Adds `authHeaderName` / `authHeaderScheme` + a `buildAuthHeader()` helper used by `invoke()` and `stream()`. Defaults unchanged, so the other leaves aren't affected. |
 | `113d3b91` | `providers: add Azure OpenAI provider leaf (#304)` | The `azure-openai` leaf (`definition.ts`, `adapter.ts`, `provider.ts`, `index.ts`), regenerated catalogs, and the Azure tests. |
 | `a928b084` | `providers: register azure-openai in shared vendor-roster tests` | Adds `azure-openai` to the hard-coded roster tests (merged with the newly landed vendors). |
+| `67681d25` | `providers: preserve configured endpoint through registry normalization (#425)` | Review follow-up: `normalizeRemoteConfig()` keeps an explicit `config.endpoint` (only falls back to `definition.defaultEndpoint` when absent). Adds a registry-level Azure test for a custom resource host; updates openai/anthropic tests that assumed the old overwrite. |
 
 The PR diff is scoped to the issue — all under `self/subcortex/providers/`, no random formatting changes or commented-out code.
 
@@ -176,8 +185,10 @@ The PR diff is scoped to the issue — all under `self/subcortex/providers/`, no
 
 **Files I modified:**
 
-- `protocols/openai-api/provider.ts` — the only shared change (+25 / −10), the header options + helper.
+- `protocols/openai-api/provider.ts` — shared auth-header options + helper (`authHeaderName` / `authHeaderScheme`).
+- `runtime/provider-runtime.ts` — review follow-up: preserve an explicit configured endpoint in `normalizeRemoteConfig()` instead of always overwriting with `definition.defaultEndpoint`.
 - `__tests__/chat-completions-provider.test.ts` — tests for the new header behavior.
+- `__tests__/provider-registry.test.ts` — registry-level Azure custom-endpoint test + openai/anthropic expectation updates.
 - `provider-definitions.ts`, `provider-adapters.ts`, `provider-factories.ts` — regenerated (not edited by hand).
 - `__tests__/adapter-resolver.test.ts`, `provider-codegen.test.ts`, `provider-definitions/provider-definitions.test.ts`, `provider-definitions/provider-definition-types.test.ts`, `provider-pipeline-integration.test.ts` — roster updates.
 
@@ -188,6 +199,7 @@ The PR diff is scoped to the issue — all under `self/subcortex/providers/`, no
 - **api-version is required and changes.** Azure returns a 400 without it, and supported versions differ per resource. I defaulted to `2024-10-21` but made `AZURE_OPENAI_API_VERSION` override it, with tests for both.
 - **The hard-coded roster tests (already knew this one from vLLM).** Adding a vendor breaks one compile-time exact-union test and four runtime roster tests. This time I updated all five as part of the commits instead of getting surprised at the end.
 - **Rebase conflicts before the PR was mergeable.** By the time I opened [#425](https://github.com/orthogonalhq/nous-core/pull/425), the integration branch had moved a lot (xAI, Mistral, Gemini, Qwen Code, etc.). GitHub showed conflicts in the same roster/catalog files. I rebased onto the latest tip, merged `azure-openai` into the updated vendor lists (kept gemini/mistral/qwen-code/xai), force-pushed, and the PR went mergeable.
+- **Registry overwrote the Azure resource endpoint (maintainer review).** My leaf tests only covered the factory path, so I missed that `normalizeRemoteConfig()` replaced every remote provider's endpoint with the definition default. For Azure that default is a placeholder, so the real BYOK host never reached the provider. Fixed centrally in the registry and added a registry-level test that registers Azure with `https://acme-resource.openai.azure.com` and asserts the invoked URL uses that host.
 
 ---
 
@@ -207,9 +219,14 @@ I followed the existing test files (mostly `perplexity-provider.test.ts` and `ch
 
 **Roster tests updated:** `adapter-resolver`, `provider-codegen`, `provider-definition-types` (the compile-time one), `provider-definitions`, `provider-pipeline-integration`.
 
+**Registry-level test added after review — `__tests__/provider-registry.test.ts`:**
+- registers an Azure provider with a custom resource endpoint (`https://acme-resource.openai.azure.com`);
+- asserts `provider.getConfig().endpoint` keeps that host (not the placeholder);
+- asserts `invoke()` hits `https://acme-resource.openai.azure.com/openai/deployments/.../chat/completions?api-version=2024-10-21`.
+
 **What passed:**
-- Full provider suite: **473 tests passing / 4 skipped (34 files)**, up from 440, so +33 new tests and no regressions.
-- `check:generated` clean.
+- Full provider suite was green at Phase III (**473 passing / 4 skipped**); after the registry fix I re-ran the Azure + registry tests covering the new path.
+- `check:generated` clean (maintainer also confirmed this on review).
 - I didn't spin up a real Azure resource (it's BYOK, there's no shared test key), so the transport is checked automatically with a mocked `fetch` that asserts the exact URL and headers. I did manually compare the URL I build against Microsoft's REST docs to make sure the path and default api-version are right.
 
 ---
@@ -220,9 +237,9 @@ I followed the existing test files (mostly `perplexity-provider.test.ts` and `ch
 
 **PR target:** `feat/contributor-friendly-inference-provider-surface` (same integration branch as the accepted Groq [#404], llama.cpp [#403], and my vLLM [#417] leaves — not `dev` or `main`).
 
-**Status:** Open, awaiting maintainer review. Opened 2026-07-17 against upstream (`orthogonalhq/nous-core`) from my fork (`skonda29/nous-core:feat/azure-openai-provider-304`). After a rebase onto the latest integration tip (to clear conflicts from newly merged leaves), the PR is mergeable.
+**Status:** Open. Opened 2026-07-17 against upstream (`orthogonalhq/nous-core`) from my fork (`skonda29/nous-core:feat/azure-openai-provider-304`). @atlamors requested changes on 2026-07-21 (preserve configured endpoint through registry normalization); I pushed the fix (`67681d25`) and replied on the PR. Awaiting re-review.
 
-**Summary:** Adds Azure OpenAI as a certified BYOK provider leaf under the narrowed scope from #304. The only shared-code change is a backwards-compatible auth-header option on `ChatCompletionsProvider` (`api-key`/raw vs. the default `Authorization`/bearer). The Azure deployment URL is built in the leaf factory using the already-opaque `completionsPath`. Fail-closed on credentials (no `OPENAI_API_KEY` fallback), id derived from `vendorKey`, catalogs regenerated via the generator, `IModelProvider` / `TextModelInputSchema` unchanged. Foundry / Entra / quota / routing / billing left to #421. The PR description flags the header protocol-boundary change the way the maintainer asked.
+**Summary:** Adds Azure OpenAI as a certified BYOK provider leaf under the narrowed scope from #304. Shared changes: (1) backwards-compatible auth-header options on `ChatCompletionsProvider` (`api-key`/raw vs. default bearer), and (2) after review, `ProviderRegistry.normalizeRemoteConfig()` preserves an explicit configured endpoint so BYOK hosts aren't overwritten by the leaf's placeholder default. The Azure deployment URL is built in the leaf factory using the already-opaque `completionsPath`. Fail-closed on credentials, id derived from `vendorKey`, catalogs regenerated via the generator. Foundry / Entra / quota / routing / billing left to #421.
 
 ---
 
@@ -235,9 +252,11 @@ I followed the existing test files (mostly `perplexity-provider.test.ts` and `ch
 | 2026-06-30 | `git blame` on `provider.ts:97`, `provider-definition.ts:34` | The refactor that added the `raw` scheme to the schema left the shared provider hard-coding bearer. | Told me the header fix in the shared provider was the intended direction. | — |
 | 2026-07-08 | @atlamors on #304 | Narrowed it to a **BYOK connector only** (endpoint + key + deployment name as the model), excluded Foundry / Entra / quota / routing / fallback / billing (those go to #421), and asked me to flag protocol-boundary issues in the PR. Assigned me. | Built exactly that scope; `config.modelId` = deployment name; descope written into `definition.ts`; only the header changed centrally, URL stayed in the leaf. | `6c703ab8`, `113d3b91`, `a928b084` |
 | 2026-07-10 | @atlamors on #304 | Acknowledged my update — "Looking forward to the PR." | Confirmed I'd started under the narrowed scope and had checked sibling leaf PRs (#424, #419, #420) for review issues to avoid (doubled `/v1/v1` path, adapterKey collisions); neither applies here. | #304 comment |
-| 2026-07-17 | PR #425 opened | Opened against the integration branch; rebased after merge conflicts from newly landed leaves. | Awaiting review. Flagged the auth-header protocol-boundary change and the #421 descope in the PR description. | PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) |
+| 2026-07-17 | PR #425 opened | Opened against the integration branch; rebased after merge conflicts from newly landed leaves. | Flagged the auth-header protocol-boundary change and the #421 descope in the PR description. | PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) |
+| 2026-07-21 | @atlamors on PR #425 (**Request changes**) | Scope looks right (BYOK only). Deployment path, `api-key` header, and fail-closed key handling look good. **Blocker:** `ProviderRegistry.normalizeRemoteConfig()` overwrites every remote provider's configured endpoint with `definition.defaultEndpoint`, so Azure's placeholder default replaces the user's real resource host before the factory runs. Fix by only falling back to the definition default when `config.endpoint` is absent, and add a registry-level Azure test that asserts the invoked URL uses the custom host. Treated as shared-runtime debt, not an Azure leaf mistake — but still required before merge. CI roster churn from other merges is not a contributor blocker. | Agreed it's a shared-runtime gap; fixed normalization and added the registry-level Azure custom-endpoint test; updated openai/anthropic tests that asserted the old overwrite. | `67681d25` |
+| 2026-07-26 | me on PR #425 | — | Replied thanking him for the review and summarizing the fix before/while pushing. | PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) comment |
 
-> This log will be updated with line-level review comments and my responses (with commit refs) as the PR is reviewed.
+> This log will be updated with further review comments and my responses (with commit refs) as re-review happens.
 
 ---
 
@@ -253,8 +272,13 @@ I followed the existing test files (mostly `perplexity-provider.test.ts` and `ch
   @atlamors replied: *"Awesome, thanks @skonda29. Looking forward to the PR."*
 
 - **2026-07-17** — Opened PR [#425](https://github.com/orthogonalhq/nous-core/pull/425) against `feat/contributor-friendly-inference-provider-surface`. Rebased onto the latest integration tip to clear catalog/roster conflicts from newly merged leaves (xAI, Mistral, Gemini, Qwen Code), force-pushed, and confirmed the PR is mergeable.
+- **2026-07-21** — @atlamors requested changes on #425: preserve the user-supplied Azure resource endpoint through `ProviderRegistry.normalizeRemoteConfig()` (don't overwrite with the placeholder default), and add a registry-level Azure test.
+- **2026-07-26** — Replied on the PR and pushed the fix (`67681d25`):
+
+  > Hi @atlamors, Thanks for the detailed review. You're right that this is a shared-runtime gap rather than an Azure-specific one. normalizeRemoteConfig() was unconditionally overwriting the configured endpoint with definition.defaultEndpoint, which breaks any per-resource BYOK host. Fixing it now so it only falls back to the definition default when config.endpoint is absent, and adding the registry-level Azure test you asked for (custom resource endpoint → asserts the invoked URL, not the placeholder). Will push shortly.
+
 - **Check-in form:** submitted with **"Phase IV Complete"** / PR opened as required.
-- **Next:** respond to maintainer review comments on #425 as they come in.
+- **Next:** wait for re-review on #425.
 
 ---
 
@@ -268,6 +292,7 @@ A few things I did that weren't strictly required:
 - **Used the project's own test patterns.** I exported `buildAzureCompletionsPath` so it could be unit-tested directly, copied the mocked-`fetch` style from the existing tests, and added a regression test proving the default Bearer behavior still works for the other leaves.
 - **Handled real Azure quirks.** URL-encoded deployment names, overridable api-version, GA default — all with tests.
 - **Checked the other in-flight leaf PRs first.** Before opening mine I read the sibling provider PRs (#424, #419, #420) to see what reviewers had already flagged — a doubled `/v1/v1` path and adapterKey collisions. Neither applies to Azure, but confirming that up front means I'm not re-introducing a bug the maintainer already had to point out on someone else's PR.
+- **Fixed the shared-runtime endpoint overwrite as a general BYOK fix, not an Azure hack.** When the maintainer pointed out `normalizeRemoteConfig()` wiping configured endpoints, I treated it as provider-surface debt (his framing) and fixed the shared path with a small `config.endpoint ?? definition.defaultEndpoint` change, plus a registry-level test so the next BYOK leaf doesn't hit the same hole.
 
 ---
 
